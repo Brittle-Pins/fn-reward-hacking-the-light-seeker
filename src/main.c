@@ -7,16 +7,25 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "driver/uart.h"
+#include "driver/i2c.h"
 #include "esp_vfs_dev.h"
 #include "esp_random.h"
+#include "i2c_lcd.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
-// Define Buttons
+// Define Buttons and Encoder
 #define BUTTON_2_GPIO 19
 #define BUTTON_3_GPIO 21
+#define ENCODER_CLK_GPIO 27
+#define ENCODER_DT_GPIO 33
+#define ENCODER_SW_GPIO 25
+
+// Define I2C Pins
+#define I2C_SDA_GPIO 23
+#define I2C_SCL_GPIO 22
 
 // Define Servos
 #define SERVO_PAN_GPIO 14
@@ -171,6 +180,99 @@ void servo_motion_task(void *pvParameters) {
     }
 }
 
+// Global state for weights
+float weight_v = 1.0f;
+float weight_t = 0.0f;
+int encoder_value = 0;
+int last_encoder_value = 0;
+
+// Initialize I2C Master
+void i2c_master_init(void) {
+    i2c_config_t conf = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = I2C_SDA_GPIO,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_io_num = I2C_SCL_GPIO,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = 100000,
+    };
+    i2c_param_config(I2C_MASTER_NUM, &conf);
+    i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0);
+}
+
+// Update the LCD display
+void update_lcd_display() {
+    char buf[17];
+    lcd_set_cursor(0, 0);
+    snprintf(buf, sizeof(buf), "Voltage W: %.2f", weight_v);
+    lcd_print(buf);
+    
+    lcd_set_cursor(0, 1);
+    snprintf(buf, sizeof(buf), "Tilt W   : %.2f", weight_t);
+    lcd_print(buf);
+}
+
+// Encoder polling task
+void encoder_task(void *pvParameters) {
+    gpio_config_t enc_config = {
+        .pin_bit_mask = (1ULL << ENCODER_CLK_GPIO) | (1ULL << ENCODER_DT_GPIO) | (1ULL << ENCODER_SW_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&enc_config);
+
+    uint8_t last_state = (gpio_get_level(ENCODER_DT_GPIO) << 1) | gpio_get_level(ENCODER_CLK_GPIO);
+    
+    while (1) {
+        uint8_t current_state = (gpio_get_level(ENCODER_DT_GPIO) << 1) | gpio_get_level(ENCODER_CLK_GPIO);
+        
+        if (current_state != last_state) {
+            // Simple state machine for quadrature decoding
+            if (last_state == 0b00) {
+                if (current_state == 0b01) encoder_value++;
+                if (current_state == 0b10) encoder_value--;
+            } else if (last_state == 0b01) {
+                if (current_state == 0b11) encoder_value++;
+                if (current_state == 0b00) encoder_value--;
+            } else if (last_state == 0b11) {
+                if (current_state == 0b10) encoder_value++;
+                if (current_state == 0b01) encoder_value--;
+            } else if (last_state == 0b10) {
+                if (current_state == 0b00) encoder_value++;
+                if (current_state == 0b11) encoder_value--;
+            }
+            last_state = current_state;
+            
+            // Adjust weights every 2 ticks (detents usually have 2 or 4 ticks)
+            if (abs(encoder_value - last_encoder_value) >= 2) {
+                if (encoder_value > last_encoder_value) {
+                    weight_t += 0.05f;
+                } else {
+                    weight_t -= 0.05f;
+                }
+                
+                if (weight_t > 1.0f) weight_t = 1.0f;
+                if (weight_t < 0.0f) weight_t = 0.0f;
+                
+                weight_v = 1.0f - weight_t;
+                last_encoder_value = encoder_value;
+                
+                update_lcd_display();
+            }
+        }
+        
+        // Also check encoder switch
+        if (gpio_get_level(ENCODER_SW_GPIO) == 0) {
+            printf("\nEncoder Button Pressed! Future: wipe Q-table and restart.\n");
+            vTaskDelay(pdMS_TO_TICKS(300)); // Debounce
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10)); // Poll at 100Hz (10ms) to avoid Watchdog starvation
+    }
+}
+
 // Task for handling Serial Monitor Input
 void serial_input_task(void *pvParameters) {
     char input_buf[64];
@@ -227,13 +329,19 @@ void app_main(void) {
     // 2. Initialize Servos
     servo_init();
 
-    // 3. Start Tasks
+    // 3. Initialize I2C and LCD
+    i2c_master_init();
+    lcd_init();
+    update_lcd_display();
+
+    // 4. Start Tasks
     xTaskCreate(servo_motion_task, "servo_motion_task", 4096, NULL, 5, NULL);
     xTaskCreate(serial_input_task, "serial_input_task", 4096, NULL, 5, NULL);
+    xTaskCreate(encoder_task, "encoder_task", 4096, NULL, 5, NULL);
 
-    printf("\nInitialization complete. Waiting for commands...\n");
+    printf("\nInitialization complete. LCD should show initial weights.\n");
 
-    // 4. Main loop to poll the buttons
+    // 5. Main loop to poll the buttons
     while (1) {
         if (gpio_get_level(BUTTON_3_GPIO) == 0) {
             printf("\nButton 3 pressed! Setting motors to position 0 smoothly.\n");
