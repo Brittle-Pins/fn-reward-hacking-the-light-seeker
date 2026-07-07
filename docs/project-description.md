@@ -120,11 +120,11 @@ The demonstration aims to show how the improved specification of the reward func
 
 - State 0 (Idle): The Q-table array is zeroed out via a simple memset. The platform is stationary.
   > Filling the table with random values is sometimes used in deep learning to break symmetry, but in tabular Q-learning for a deterministic physical environment, random initial values can introduce unwanted noise and misguide early exploration. By initializing the 2.25 KB memory grid entirely to zero, every state-action pair starts on equal footing.
-- State 1 (Training): Triggered by a Button 1 press. The user sets $w_v = 1.0$ and $w_t = 0.0$. The device steps through the grid, reads the normalized sensor data, applies the reward function, and fills the Q-table.
+- State 1 (Training): The user sets $w_v = 1.0$ and $w_t = 0.0$ using the rotary encoder and presses the encoder knob (SW) to start training. The device steps through the grid, reads the normalized sensor data, applies the reward function, and fills the Q-table.
 - State 2 (Positioning): Training completes, as indicated by the LED turning on. The platform deliberately drives to a randomized, neutral pan-tilt position so that the inference starts from a fresh location every time.
-- State 3 (Inference): Triggered by a Button 2 press. The agent strictly exploits the Q-table (exploration rate is 0). Because $w_v = 1.0$, it confidently locks onto the LED indicator on the base.
-- State 3a (Iterative inference): A Button 3 press resets the system to a random pan-tilt position. After a Button 2 press, the agent again exploits the Q-table. The LED trap is consistently found, and the agent repeatedly returns to the sub-optimal state.
-- State 4 (Iteration): On a Button 1 press, the system resets, wiping the table. The user dials the weights (e.g., $w_v = 0.6, w_t = 0.4$) and restarts the cycle. As $w_t$ increases, the algorithm mathematically overcomes the localized LED trap and successfully finds the ambient light above.
+- State 3 (Inference): Triggered by a Button 1 press. The agent strictly exploits the Q-table (exploration rate is 0). Because $w_v = 1.0$, it confidently locks onto the LED indicator on the base.
+- State 3a (Iterative inference): A Button 2 press resets the system to a random pan-tilt position. After a Button 1 press, the agent again exploits the Q-table. The LED trap is consistently found, and the agent repeatedly returns to the sub-optimal state.
+- State 4 (Iteration): By turning the rotary encoder, the user dials new weights (e.g., $w_v = 0.6, w_t = 0.4$) and presses the encoder knob to reset the system, wipe the table, and restart the training cycle. As $w_t$ increases, the algorithm mathematically overcomes the localized LED trap and successfully finds the ambient light above.
 
 ### Weighted reward function
 
