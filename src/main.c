@@ -8,12 +8,14 @@
 #include "driver/ledc.h"
 #include "driver/uart.h"
 #include "esp_vfs_dev.h"
+#include "esp_random.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
-// Define Button 3
+// Define Buttons
+#define BUTTON_2_GPIO 19
 #define BUTTON_3_GPIO 21
 
 // Define Servos
@@ -212,9 +214,9 @@ void app_main(void) {
     esp_vfs_dev_uart_port_set_rx_line_endings(CONFIG_ESP_CONSOLE_UART_NUM, ESP_LINE_ENDINGS_CR);
     esp_vfs_dev_uart_port_set_tx_line_endings(CONFIG_ESP_CONSOLE_UART_NUM, ESP_LINE_ENDINGS_CRLF);
 
-    // 1. Configure Button 3
+    // 1. Configure Buttons (Button 2 and Button 3)
     gpio_config_t btn_config = {
-        .pin_bit_mask = (1ULL << BUTTON_3_GPIO),
+        .pin_bit_mask = (1ULL << BUTTON_2_GPIO) | (1ULL << BUTTON_3_GPIO),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -231,7 +233,7 @@ void app_main(void) {
 
     printf("\nInitialization complete. Waiting for commands...\n");
 
-    // 4. Main loop to poll the button
+    // 4. Main loop to poll the buttons
     while (1) {
         if (gpio_get_level(BUTTON_3_GPIO) == 0) {
             printf("\nButton 3 pressed! Setting motors to position 0 smoothly.\n");
@@ -239,6 +241,18 @@ void app_main(void) {
             set_servo_angle_smooth(TILT_SERVO_INDEX, 0.0f);
             vTaskDelay(pdMS_TO_TICKS(200)); 
         }
+        
+        if (gpio_get_level(BUTTON_2_GPIO) == 0) {
+            // Generate random angles within the operational range
+            float rand_pan = (float)(esp_random() % (int)(SERVO_MAX_DEGREE + 1));
+            float rand_tilt = (float)(esp_random() % (int)(SERVO_MAX_DEGREE + 1));
+            
+            printf("\nButton 2 pressed! Randomizing motors smoothly: Pan=%.1f, Tilt=%.1f\n", rand_pan, rand_tilt);
+            set_servo_angle_smooth(PAN_SERVO_INDEX, rand_pan);
+            set_servo_angle_smooth(TILT_SERVO_INDEX, rand_tilt);
+            vTaskDelay(pdMS_TO_TICKS(200)); 
+        }
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
