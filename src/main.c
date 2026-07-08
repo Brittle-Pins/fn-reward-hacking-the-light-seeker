@@ -26,6 +26,7 @@
 #define ENCODER_CLK_GPIO 27
 #define ENCODER_DT_GPIO 33
 #define ENCODER_SW_GPIO 25
+#define LED_INDICATOR_GPIO 26
 
 // Define I2C Pins
 #define I2C_SDA_GPIO 23
@@ -269,6 +270,95 @@ float calculate_reward(int tilt_index) {
     return (weight_v * v_norm) + (weight_t * t_norm);
 }
 
+// Q-Learning Global State
+float q_table[12][12][4]; 
+float rewards_matrix[12][12];
+
+// Training Task
+void training_task(void *pvParameters) {
+    printf("\n--- STARTING TRAINING ---\n");
+    gpio_set_level(LED_INDICATOR_GPIO, 0); // Turn off LED
+    memset(q_table, 0, sizeof(q_table));
+    memset(rewards_matrix, 0, sizeof(rewards_matrix));
+    
+    // 1. Grid Scan
+    for (int pan = 0; pan < 12; pan++) {
+        for (int tilt = 0; tilt < 12; tilt++) {
+            // Move hardware
+            set_servo_angle_smooth(PAN_SERVO_INDEX, pan * 15.0f);
+            set_servo_angle_smooth(TILT_SERVO_INDEX, tilt * 15.0f);
+            
+            // Wait for motion to complete
+            while (servos[PAN_SERVO_INDEX].is_moving || servos[TILT_SERVO_INDEX].is_moving) {
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+            // Extra settle time
+            vTaskDelay(pdMS_TO_TICKS(100));
+            
+            // Calculate and store reward
+            rewards_matrix[pan][tilt] = calculate_reward(tilt);
+        }
+    }
+    
+    printf("\nGrid scan complete. Running Value Iteration...\n");
+    
+    // 2. Value Iteration (in memory)
+    float alpha = 0.1f;
+    float gamma = 0.9f;
+    
+    for (int iter = 0; iter < 1000; iter++) {
+        for (int pan = 0; pan < 12; pan++) {
+            for (int tilt = 0; tilt < 12; tilt++) {
+                for (int a = 0; a < 4; a++) { // 0=PAN_LEFT, 1=PAN_RIGHT, 2=TILT_UP, 3=TILT_DOWN
+                    // Determine next state
+                    int next_pan = pan;
+                    int next_tilt = tilt;
+                    if (a == 0 && pan > 0) next_pan--; // PAN_LEFT
+                    if (a == 1 && pan < 11) next_pan++; // PAN_RIGHT
+                    if (a == 2 && tilt > 0) next_tilt--; // TILT_UP (0 is up)
+                    if (a == 3 && tilt < 11) next_tilt++; // TILT_DOWN (11 is down)
+                    
+                    // Find max Q in next state
+                    float max_q_next = 0.0f;
+                    for (int next_a = 0; next_a < 4; next_a++) {
+                        if (q_table[next_pan][next_tilt][next_a] > max_q_next) {
+                            max_q_next = q_table[next_pan][next_tilt][next_a];
+                        }
+                    }
+                    
+                    // Update Q-value
+                    float r = rewards_matrix[next_pan][next_tilt];
+                    q_table[pan][tilt][a] = q_table[pan][tilt][a] + alpha * (r + gamma * max_q_next - q_table[pan][tilt][a]);
+                }
+            }
+        }
+    }
+    
+    // 3. Print Q-table Max Values
+    printf("\n--- OPTIMAL POLICY (Max Q-Values) ---\n");
+    for (int tilt = 0; tilt < 12; tilt++) {
+        for (int pan = 0; pan < 12; pan++) {
+            float max_q = 0.0f;
+            for (int a = 0; a < 4; a++) {
+                if (q_table[pan][tilt][a] > max_q) {
+                    max_q = q_table[pan][tilt][a];
+                }
+            }
+            printf("%.2f ", max_q);
+        }
+        printf("\n");
+    }
+    
+    // 4. Return to center
+    set_servo_angle_smooth(PAN_SERVO_INDEX, 90.0f);
+    set_servo_angle_smooth(TILT_SERVO_INDEX, 90.0f);
+    
+    printf("\nTraining complete!\n");
+    gpio_set_level(LED_INDICATOR_GPIO, 1); // Turn on LED
+    
+    vTaskDelete(NULL);
+}
+
 // Update the LCD display
 void update_lcd_display() {
     char buf[17];
@@ -379,8 +469,10 @@ void encoder_task(void *pvParameters) {
         
         // Also check encoder switch
         if (gpio_get_level(ENCODER_SW_GPIO) == 0) {
-            printf("\nEncoder Button Pressed! Future: wipe Q-table and restart.\n");
-            vTaskDelay(pdMS_TO_TICKS(300)); // Debounce
+            printf("\nEncoder Button Pressed! Wiping Q-table and starting training...\n");
+            xTaskCreate(training_task, "training_task", 8192, NULL, 4, NULL);
+            // Debounce
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
 
         vTaskDelay(pdMS_TO_TICKS(50)); // Check for UI updates at a safe 20Hz
@@ -430,7 +522,7 @@ void app_main(void) {
     esp_vfs_dev_uart_port_set_rx_line_endings(CONFIG_ESP_CONSOLE_UART_NUM, ESP_LINE_ENDINGS_CR);
     esp_vfs_dev_uart_port_set_tx_line_endings(CONFIG_ESP_CONSOLE_UART_NUM, ESP_LINE_ENDINGS_CRLF);
 
-    // 1. Configure Buttons (Button 2 and Button 3)
+    // 1. Configure Buttons (Button 2 and Button 3) and LED
     gpio_config_t btn_config = {
         .pin_bit_mask = (1ULL << BUTTON_2_GPIO) | (1ULL << BUTTON_3_GPIO),
         .mode = GPIO_MODE_INPUT,
@@ -439,6 +531,16 @@ void app_main(void) {
         .intr_type = GPIO_INTR_DISABLE
     };
     gpio_config(&btn_config);
+    
+    gpio_config_t led_config = {
+        .pin_bit_mask = (1ULL << LED_INDICATOR_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&led_config);
+    gpio_set_level(LED_INDICATOR_GPIO, 0); // Initially off
 
     // 2. Initialize NVS and Load Configuration
     init_nvs();
