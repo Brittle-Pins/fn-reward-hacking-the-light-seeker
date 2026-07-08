@@ -21,6 +21,7 @@
 #endif
 
 // Define Buttons and Encoder
+#define BUTTON_1_GPIO 18
 #define BUTTON_2_GPIO 19
 #define BUTTON_3_GPIO 21
 #define ENCODER_CLK_GPIO 27
@@ -396,6 +397,75 @@ void training_task(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
+// Inference Task
+void inference_task(void *pvParameters) {
+    printf("\n--- STARTING INFERENCE ---\n");
+    bool visited[12][12];
+    memset(visited, 0, sizeof(visited));
+    
+    while(1) {
+        int pan = (int)(servos[PAN_SERVO_INDEX].target_angle / 15.0f + 0.5f);
+        int tilt = (int)(servos[TILT_SERVO_INDEX].target_angle / 15.0f + 0.5f);
+        
+        // Safety bounds
+        if (pan > 11) pan = 11; 
+        if (pan < 0) pan = 0;
+        if (tilt > 11) tilt = 11; 
+        if (tilt < 0) tilt = 0;
+        
+        visited[pan][tilt] = true;
+        
+        // Find best action
+        float max_q = -1.0f;
+        int best_a = -1;
+        
+        for(int a=0; a<4; a++) {
+            if(q_table[pan][tilt][a] > max_q) {
+                max_q = q_table[pan][tilt][a];
+                best_a = a;
+            }
+        }
+        
+        if (best_a == -1 || max_q == 0.0f) {
+            printf("No valid path found (Q-table is likely empty).\n");
+            break;
+        }
+        
+        // Determine next state
+        int next_pan = pan;
+        int next_tilt = tilt;
+        if (best_a == 0 && pan > 0) next_pan--; // PAN_LEFT
+        if (best_a == 1 && pan < 11) next_pan++; // PAN_RIGHT
+        if (best_a == 2 && tilt > 0) next_tilt--; // TILT_UP
+        if (best_a == 3 && tilt < 11) next_tilt++; // TILT_DOWN
+        
+        if (next_pan == pan && next_tilt == tilt) {
+            printf("Reached a wall. Destination found!\n");
+            break;
+        }
+        
+        // Loop prevention
+        if (visited[next_pan][next_tilt]) {
+            printf("Oscillation detected (peak reached). Destination found!\n");
+            break;
+        }
+        
+        // Execute move
+        printf("Taking action %d (Q: %.2f) to [%d, %d]\n", best_a, max_q, next_pan, next_tilt);
+        set_servo_angle_smooth(PAN_SERVO_INDEX, next_pan * 15.0f);
+        set_servo_angle_smooth(TILT_SERVO_INDEX, next_tilt * 15.0f);
+        
+        // Wait for move to finish
+        while (servos[PAN_SERVO_INDEX].is_moving || servos[TILT_SERVO_INDEX].is_moving) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        vTaskDelay(pdMS_TO_TICKS(250)); // Brief pause before next step
+    }
+    
+    printf("Inference complete.\n");
+    vTaskDelete(NULL);
+}
+
 // Update the LCD display
 void update_lcd_display() {
     char buf[17];
@@ -559,9 +629,9 @@ void app_main(void) {
     esp_vfs_dev_uart_port_set_rx_line_endings(CONFIG_ESP_CONSOLE_UART_NUM, ESP_LINE_ENDINGS_CR);
     esp_vfs_dev_uart_port_set_tx_line_endings(CONFIG_ESP_CONSOLE_UART_NUM, ESP_LINE_ENDINGS_CRLF);
 
-    // 1. Configure Buttons (Button 2 and Button 3) and LED
+    // 1. Configure Buttons (Button 1, 2 and 3) and LED
     gpio_config_t btn_config = {
-        .pin_bit_mask = (1ULL << BUTTON_2_GPIO) | (1ULL << BUTTON_3_GPIO),
+        .pin_bit_mask = (1ULL << BUTTON_1_GPIO) | (1ULL << BUTTON_2_GPIO) | (1ULL << BUTTON_3_GPIO),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -600,10 +670,16 @@ void app_main(void) {
     xTaskCreate(serial_input_task, "serial_input_task", 4096, NULL, 5, NULL);
     xTaskCreate(encoder_task, "encoder_task", 4096, NULL, 5, NULL);
 
-    printf("\nInitialization complete. LCD should show initial weights.\n");
+    printf("\nInitialization complete. Ready for Training or Inference.\n");
 
     // 6. Main loop to poll the buttons
     while (1) {
+        if (gpio_get_level(BUTTON_1_GPIO) == 0) {
+            printf("\nButton 1 pressed! Starting Inference...\n");
+            xTaskCreate(inference_task, "inference_task", 4096, NULL, 5, NULL);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+        
         if (gpio_get_level(BUTTON_3_GPIO) == 0) {
             printf("\nButton 3 pressed! Setting motors to position 0 smoothly.\n");
             set_servo_angle_smooth(PAN_SERVO_INDEX, 0.0f);
