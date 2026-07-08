@@ -10,6 +10,9 @@
 #include "driver/i2c.h"
 #include "esp_vfs_dev.h"
 #include "esp_random.h"
+#include "esp_timer.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include "i2c_lcd.h"
 
 #ifndef M_PI
@@ -187,6 +190,10 @@ volatile int encoder_value = 0;
 int last_encoder_value = 0;
 volatile uint8_t last_clk_state = 0;
 
+// NVS tracking
+bool weights_need_saving = false;
+uint32_t last_knob_turn_time = 0;
+
 // Interrupt Service Routine for the Encoder
 static void IRAM_ATTR encoder_isr_handler(void* arg) {
     uint8_t clk = gpio_get_level(ENCODER_CLK_GPIO);
@@ -228,6 +235,48 @@ void update_lcd_display() {
     lcd_print(buf);
 }
 
+// Initialize NVS
+void init_nvs(void) {
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+}
+
+// Load weights from NVS
+void load_weights(void) {
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("storage", NVS_READONLY, &my_handle);
+    if (err == ESP_OK) {
+        uint32_t w_t_bin = 0;
+        err = nvs_get_u32(my_handle, "weight_t", &w_t_bin);
+        if (err == ESP_OK) {
+            memcpy(&weight_t, &w_t_bin, sizeof(float));
+            weight_v = 1.0f - weight_t;
+            printf("Loaded weights from NVS: w_v=%.2f, w_t=%.2f\n", weight_v, weight_t);
+        }
+        nvs_close(my_handle);
+    } else {
+        printf("NVS weights not found. Using defaults.\n");
+    }
+}
+
+// Save weights to NVS
+void save_weights(float t) {
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
+    if (err == ESP_OK) {
+        uint32_t w_t_bin = 0;
+        memcpy(&w_t_bin, &t, sizeof(float));
+        nvs_set_u32(my_handle, "weight_t", w_t_bin);
+        nvs_commit(my_handle);
+        nvs_close(my_handle);
+        printf("\nWeights saved to NVS: w_t=%.2f\n", t);
+    }
+}
+
 // Encoder UI Update Task (Runs at a relaxed pace to update LCD)
 void encoder_task(void *pvParameters) {
     // 1. Configure the GPIO pins
@@ -261,6 +310,19 @@ void encoder_task(void *pvParameters) {
             last_encoder_value = encoder_value;
             
             update_lcd_display();
+            
+            // Mark for delayed saving
+            weights_need_saving = true;
+            last_knob_turn_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        }
+        
+        // Execute delayed save if 3 seconds have passed
+        if (weights_need_saving) {
+            uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            if (current_time - last_knob_turn_time >= 3000) {
+                save_weights(weight_t);
+                weights_need_saving = false;
+            }
         }
         
         // Also check encoder switch
@@ -326,22 +388,26 @@ void app_main(void) {
     };
     gpio_config(&btn_config);
 
-    // 2. Initialize Servos
+    // 2. Initialize NVS and Load Configuration
+    init_nvs();
+    load_weights();
+
+    // 3. Initialize Servos
     servo_init();
 
-    // 3. Initialize I2C and LCD
+    // 4. Initialize I2C and LCD
     i2c_master_init();
     lcd_init();
     update_lcd_display();
 
-    // 4. Start Tasks
+    // 5. Start Tasks
     xTaskCreate(servo_motion_task, "servo_motion_task", 4096, NULL, 5, NULL);
     xTaskCreate(serial_input_task, "serial_input_task", 4096, NULL, 5, NULL);
     xTaskCreate(encoder_task, "encoder_task", 4096, NULL, 5, NULL);
 
     printf("\nInitialization complete. LCD should show initial weights.\n");
 
-    // 5. Main loop to poll the buttons
+    // 6. Main loop to poll the buttons
     while (1) {
         if (gpio_get_level(BUTTON_3_GPIO) == 0) {
             printf("\nButton 3 pressed! Setting motors to position 0 smoothly.\n");
