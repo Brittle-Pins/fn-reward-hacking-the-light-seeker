@@ -132,7 +132,21 @@ The use of a convex combination of weights turns the problem into multi-objectiv
 
 $$R = w_v \cdot V_{norm} + w_t \cdot T_{norm}$$
 
-However, using raw values for position and voltage can lead to scale mismatch. The raw voltage from the photoresistor might be read as a 12-bit ADC value (0 to 4095), while the tilt state is just a grid index (0 to 11). If these raw values are multiplied by weights, the large ADC numbers will completely overpower the tilt index, rendering the weight adjustments useless. Before applying the weights, it is necessary to normalize both the sensor data and the spatial data to a common scale (e.g., 0.0 to 1.0).
+However, using raw values for position and voltage can lead to a severe scale mismatch. The raw voltage from the photoresistor is read as a 12-bit ADC value ($0$ to $4095$), while the tilt state is represented by a 0-based grid index ($0$ to $11$). If these raw values were multiplied by weights directly, the massive ADC numbers would completely overpower the tilt index, rendering any weight adjustments useless. 
+
+Before applying the weights, it is necessary to mathematically normalize both the sensor data and the spatial data to a common scale of $0.0$ to $1.0$.
+
+#### Voltage Normalization ($V_{norm}$)
+The photoresistor voltage reading is simply divided by the maximum 12-bit ADC resolution:
+$$V_{norm} = \frac{\text{adc\_reading}}{4095.0}$$
+
+#### Inverted Tilt Normalization ($T_{norm}$)
+The tilt normalization requires special physical consideration. The mechanical assembly is constructed such that an angle of $0^\circ$ (tilt index $0$) points the sensor straight up towards the ceiling (the ambient light), while $165^\circ$ (tilt index $11$) points it straight down at the glowing LED indicator on the base.
+
+Because the goal of adjusting the weights is to incentivize the agent to look *up* and ignore the LED trap below, we must design the reward such that looking up yields the highest reward ($1.0$), and looking down yields the lowest reward ($0.0$). This requires an inverted calculation:
+$$T_{norm} = \frac{11.0 - \text{tilt\_index}}{11.0}$$
+
+By normalizing the components in this way, the two values can be safely multiplied by their respective weights.
 
 Strictly speaking, the weights do not have to sum to 1 for the Q-learning algorithm to execute. However, doing so—creating a convex combination—is critically important for both mathematical stability and pedagogical clarity.
 

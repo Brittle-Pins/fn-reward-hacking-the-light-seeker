@@ -11,6 +11,7 @@
 #include "esp_vfs_dev.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "esp_adc/adc_oneshot.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "i2c_lcd.h"
@@ -223,17 +224,7 @@ void i2c_master_init(void) {
     i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0);
 }
 
-// Update the LCD display
-void update_lcd_display() {
-    char buf[17];
-    lcd_set_cursor(0, 0);
-    snprintf(buf, sizeof(buf), "Voltage W: %.2f", weight_v);
-    lcd_print(buf);
-    
-    lcd_set_cursor(0, 1);
-    snprintf(buf, sizeof(buf), "Tilt W   : %.2f", weight_t);
-    lcd_print(buf);
-}
+
 
 // Initialize NVS
 void init_nvs(void) {
@@ -243,6 +234,59 @@ void init_nvs(void) {
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+}
+
+// ADC Handle and Init
+adc_oneshot_unit_handle_t adc2_handle;
+
+void sensor_init(void) {
+    adc_oneshot_unit_init_cfg_t init_config = {
+        .unit_id = ADC_UNIT_2,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc2_handle));
+
+    adc_oneshot_chan_cfg_t config = {
+        .bitwidth = ADC_BITWIDTH_12,
+        .atten = ADC_ATTEN_DB_12,
+    };
+    // Pin 13 is ADC2_CHANNEL_4
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc2_handle, ADC_CHANNEL_4, &config));
+}
+
+// Read normalized voltage (0.0 to 1.0)
+float get_normalized_voltage(void) {
+    int adc_raw = 0;
+    esp_err_t err = adc_oneshot_read(adc2_handle, ADC_CHANNEL_4, &adc_raw);
+    if (err != ESP_OK) return 0.0f;
+    return (float)adc_raw / 4095.0f;
+}
+
+// Calculate the final reward based on inverted tilt and weights
+float calculate_reward(int tilt_index) {
+    float v_norm = get_normalized_voltage();
+    // Inverted tilt: 0 is looking up (reward 1.0), 11 is looking down (reward 0.0)
+    float t_norm = (11.0f - (float)tilt_index) / 11.0f;
+    return (weight_v * v_norm) + (weight_t * t_norm);
+}
+
+// Update the LCD display
+void update_lcd_display() {
+    char buf[17];
+    lcd_set_cursor(0, 0);
+    snprintf(buf, sizeof(buf), "wV:%.2f wT:%.2f", weight_v, weight_t);
+    lcd_print(buf);
+    
+    // Get current physical tilt index
+    int current_tilt_index = (int)(servos[TILT_SERVO_INDEX].target_angle / 15.0f + 0.5f);
+    if (current_tilt_index > 11) current_tilt_index = 11;
+    if (current_tilt_index < 0) current_tilt_index = 0;
+    
+    float v_norm = get_normalized_voltage();
+    float reward = calculate_reward(current_tilt_index);
+    
+    lcd_set_cursor(0, 1);
+    snprintf(buf, sizeof(buf), "V:%.2f R:%.2f   ", v_norm, reward);
+    lcd_print(buf);
 }
 
 // Load weights from NVS
@@ -325,6 +369,14 @@ void encoder_task(void *pvParameters) {
             }
         }
         
+        // Update LCD periodically with live sensor values (every ~500ms)
+        static uint32_t last_lcd_update = 0;
+        uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        if (current_time - last_lcd_update > 500) {
+            update_lcd_display();
+            last_lcd_update = current_time;
+        }
+        
         // Also check encoder switch
         if (gpio_get_level(ENCODER_SW_GPIO) == 0) {
             printf("\nEncoder Button Pressed! Future: wipe Q-table and restart.\n");
@@ -392,15 +444,18 @@ void app_main(void) {
     init_nvs();
     load_weights();
 
-    // 3. Initialize Servos
+    // 3. Initialize Sensors
+    sensor_init();
+
+    // 4. Initialize Servos
     servo_init();
 
-    // 4. Initialize I2C and LCD
+    // 5. Initialize I2C and LCD
     i2c_master_init();
     lcd_init();
     update_lcd_display();
 
-    // 5. Start Tasks
+    // 6. Start Tasks
     xTaskCreate(servo_motion_task, "servo_motion_task", 4096, NULL, 5, NULL);
     xTaskCreate(serial_input_task, "serial_input_task", 4096, NULL, 5, NULL);
     xTaskCreate(encoder_task, "encoder_task", 4096, NULL, 5, NULL);
