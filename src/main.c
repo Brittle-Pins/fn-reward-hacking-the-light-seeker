@@ -183,8 +183,24 @@ void servo_motion_task(void *pvParameters) {
 // Global state for weights
 float weight_v = 1.0f;
 float weight_t = 0.0f;
-int encoder_value = 0;
+volatile int encoder_value = 0;
 int last_encoder_value = 0;
+volatile uint8_t last_clk_state = 0;
+
+// Interrupt Service Routine for the Encoder
+static void IRAM_ATTR encoder_isr_handler(void* arg) {
+    uint8_t clk = gpio_get_level(ENCODER_CLK_GPIO);
+    uint8_t dt = gpio_get_level(ENCODER_DT_GPIO);
+    
+    if (clk != last_clk_state) {
+        if (dt != clk) {
+            encoder_value++;
+        } else {
+            encoder_value--;
+        }
+        last_clk_state = clk;
+    }
+}
 
 // Initialize I2C Master
 void i2c_master_init(void) {
@@ -212,55 +228,39 @@ void update_lcd_display() {
     lcd_print(buf);
 }
 
-// Encoder polling task
+// Encoder UI Update Task (Runs at a relaxed pace to update LCD)
 void encoder_task(void *pvParameters) {
+    // 1. Configure the GPIO pins
     gpio_config_t enc_config = {
         .pin_bit_mask = (1ULL << ENCODER_CLK_GPIO) | (1ULL << ENCODER_DT_GPIO) | (1ULL << ENCODER_SW_GPIO),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
+        .intr_type = GPIO_INTR_ANYEDGE // Trigger interrupt on any change to CLK
     };
     gpio_config(&enc_config);
 
-    uint8_t last_state = (gpio_get_level(ENCODER_DT_GPIO) << 1) | gpio_get_level(ENCODER_CLK_GPIO);
+    // 2. Install the GPIO ISR service and attach the handler to the CLK pin
+    gpio_install_isr_service(0);
+    last_clk_state = gpio_get_level(ENCODER_CLK_GPIO);
+    gpio_isr_handler_add(ENCODER_CLK_GPIO, encoder_isr_handler, NULL);
     
     while (1) {
-        uint8_t current_state = (gpio_get_level(ENCODER_DT_GPIO) << 1) | gpio_get_level(ENCODER_CLK_GPIO);
-        
-        if (current_state != last_state) {
-            // Simple state machine for quadrature decoding
-            if (last_state == 0b00) {
-                if (current_state == 0b01) encoder_value++;
-                if (current_state == 0b10) encoder_value--;
-            } else if (last_state == 0b01) {
-                if (current_state == 0b11) encoder_value++;
-                if (current_state == 0b00) encoder_value--;
-            } else if (last_state == 0b11) {
-                if (current_state == 0b10) encoder_value++;
-                if (current_state == 0b01) encoder_value--;
-            } else if (last_state == 0b10) {
-                if (current_state == 0b00) encoder_value++;
-                if (current_state == 0b11) encoder_value--;
+        // We only check if the interrupt has changed the value
+        if (abs(encoder_value - last_encoder_value) >= 2) {
+            if (encoder_value > last_encoder_value) {
+                weight_t += 0.05f;
+            } else {
+                weight_t -= 0.05f;
             }
-            last_state = current_state;
             
-            // Adjust weights every 2 ticks (detents usually have 2 or 4 ticks)
-            if (abs(encoder_value - last_encoder_value) >= 2) {
-                if (encoder_value > last_encoder_value) {
-                    weight_t += 0.05f;
-                } else {
-                    weight_t -= 0.05f;
-                }
-                
-                if (weight_t > 1.0f) weight_t = 1.0f;
-                if (weight_t < 0.0f) weight_t = 0.0f;
-                
-                weight_v = 1.0f - weight_t;
-                last_encoder_value = encoder_value;
-                
-                update_lcd_display();
-            }
+            if (weight_t > 1.0f) weight_t = 1.0f;
+            if (weight_t < 0.0f) weight_t = 0.0f;
+            
+            weight_v = 1.0f - weight_t;
+            last_encoder_value = encoder_value;
+            
+            update_lcd_display();
         }
         
         // Also check encoder switch
@@ -269,7 +269,7 @@ void encoder_task(void *pvParameters) {
             vTaskDelay(pdMS_TO_TICKS(300)); // Debounce
         }
 
-        vTaskDelay(pdMS_TO_TICKS(10)); // Poll at 100Hz (10ms) to avoid Watchdog starvation
+        vTaskDelay(pdMS_TO_TICKS(50)); // Check for UI updates at a safe 20Hz
     }
 }
 
