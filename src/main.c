@@ -274,6 +274,40 @@ float calculate_reward(int tilt_index) {
 float q_table[12][12][4]; 
 float rewards_matrix[12][12];
 
+// Save Q-table to NVS
+void save_q_table(void) {
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(my_handle, "q_table", q_table, sizeof(q_table));
+        if (err == ESP_OK) {
+            nvs_commit(my_handle);
+            printf("\nQ-table saved to NVS successfully.\n");
+        } else {
+            printf("\nFailed to save Q-table to NVS (%d).\n", err);
+        }
+        nvs_close(my_handle);
+    }
+}
+
+// Load Q-table from NVS
+void load_q_table(void) {
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("storage", NVS_READONLY, &my_handle);
+    if (err == ESP_OK) {
+        size_t required_size = sizeof(q_table);
+        err = nvs_get_blob(my_handle, "q_table", q_table, &required_size);
+        if (err == ESP_OK && required_size == sizeof(q_table)) {
+            printf("Loaded Q-table from NVS! Turning on LED indicator.\n");
+            gpio_set_level(LED_INDICATOR_GPIO, 1);
+        } else {
+            printf("No valid Q-table found in NVS. It will remain 0.\n");
+            gpio_set_level(LED_INDICATOR_GPIO, 0);
+        }
+        nvs_close(my_handle);
+    }
+}
+
 // Training Task
 void training_task(void *pvParameters) {
     printf("\n--- STARTING TRAINING ---\n");
@@ -352,6 +386,9 @@ void training_task(void *pvParameters) {
     // 4. Return to center
     set_servo_angle_smooth(PAN_SERVO_INDEX, 90.0f);
     set_servo_angle_smooth(TILT_SERVO_INDEX, 90.0f);
+    
+    // 5. Save to NVS
+    save_q_table();
     
     printf("\nTraining complete!\n");
     gpio_set_level(LED_INDICATOR_GPIO, 1); // Turn on LED
@@ -545,6 +582,7 @@ void app_main(void) {
     // 2. Initialize NVS and Load Configuration
     init_nvs();
     load_weights();
+    load_q_table();
 
     // 3. Initialize Sensors
     sensor_init();
